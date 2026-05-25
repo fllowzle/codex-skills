@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cross-Project Memory"
+  short_description: "Saves and retrieves reusable insights across different projects"
+  default_prompt: "Save this knowledge to shared memory"
