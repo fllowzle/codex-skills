@@ -1,8 +1,8 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Cross-project shared memory manager.
 
 Stores knowledge entries in ~/.codex/shared-memory/entries/ as Markdown files
-with YAML frontmatter. Supports save, search, list, and recent operations.
+with YAML frontmatter. Supports save, search, list, recent, and snapshot operations.
 """
 
 import argparse
@@ -70,7 +70,6 @@ def cmd_save(args):
         f.write(content)
         f.write("\n")
 
-    # Update index
     index = load_index()
     index.insert(0, {
         "file": filename,
@@ -99,7 +98,6 @@ def cmd_search(args):
         with open(fpath, "r", encoding="utf-8") as f:
             text = f.read()
 
-        # Extract frontmatter
         fm_match = re.match(r"^---\n(.*?)\n---", text, re.DOTALL)
         if not fm_match:
             continue
@@ -107,7 +105,6 @@ def cmd_search(args):
         body = text[fm_match.end():].strip()
         fm_text = fm_match.group(1)
 
-        # Parse simple YAML-like fields
         title = re.search(r'title:\s*"(.*?)"', fm_text)
         title = title.group(1) if title else fpath.stem
         date = re.search(r"date:\s*(\S+)", fm_text)
@@ -119,7 +116,6 @@ def cmd_search(args):
         category = re.search(r"category:\s*(\S+)", fm_text)
         category = category.group(1) if category else "general"
 
-        # Determine relevance
         score = 0
         if query in title.lower():
             score += 10
@@ -214,33 +210,69 @@ def cmd_recent(args):
     cmd_list(argparse.Namespace(limit=args.limit, tag=None))
 
 
+def cmd_snapshot(args):
+    """Output a project snapshot template to stdout.
+    
+    The agent fills this in by analyzing the project, then pipes to 'memory.py save'.
+    """
+    project_path = args.project or os.getcwd()
+    project_name = os.path.basename(project_path.rstrip("/\\"))
+
+    template = textwrap.dedent(f"""\
+    ## Project Snapshot: {project_name}
+
+    ### Tech Stack
+    - (list languages, frameworks, databases, infrastructure)
+
+    ### Architecture
+    - (high-level architecture pattern: monolith, microservices, serverless, etc.)
+    - (key architectural decisions)
+
+    ### Entry Points
+    - (main entry files, API endpoints, CLI commands)
+
+    ### Key Dependencies
+    - (critical libraries and why they were chosen)
+
+    ### Environment / Setup Notes
+    - (env vars, config files, ports, services needed)
+
+    ### Gotchas & Lessons Learned
+    - (non-obvious pitfalls, workarounds, things that broke)
+
+    ### Project-Specific Patterns
+    - (conventions, design patterns, naming rules used in this project)
+    """)
+
+    print(template)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Cross-project shared memory manager"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # save
     p_save = sub.add_parser("save", help="Save a knowledge entry (content from stdin)")
     p_save.add_argument("--title", "-t", required=True, help="Entry title")
     p_save.add_argument("--tags", "-g", nargs="*", default=[], help="Tags (space-separated)")
     p_save.add_argument("--category", "-c", default="general", help="Category")
     p_save.add_argument("--project", "-p", help="Source project path (default: CWD)")
 
-    # search
     p_search = sub.add_parser("search", help="Search entries")
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--limit", "-n", type=int, default=10, help="Max results")
     p_search.add_argument("--preview", type=int, default=500, help="Preview length")
 
-    # list
     p_list = sub.add_parser("list", help="List entries")
     p_list.add_argument("--limit", "-n", type=int, default=10, help="Max results")
     p_list.add_argument("--tag", help="Filter by tag")
 
-    # recent
     p_recent = sub.add_parser("recent", help="Show most recent entries")
     p_recent.add_argument("--limit", "-n", type=int, default=5, help="Max results")
+
+    p_snapshot = sub.add_parser("snapshot", help="Output project snapshot template")
+    p_snapshot.add_argument("--project", "-p", help="Project path (default: CWD)")
 
     args = parser.parse_args()
 
@@ -252,6 +284,8 @@ def main():
         cmd_list(args)
     elif args.command == "recent":
         cmd_recent(args)
+    elif args.command == "snapshot":
+        cmd_snapshot(args)
 
 
 if __name__ == "__main__":
