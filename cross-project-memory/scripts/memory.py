@@ -2,13 +2,15 @@
 """Cross-project shared memory manager.
 
 Stores knowledge entries in ~/.codex/shared-memory/entries/ as Markdown files
-with YAML frontmatter. Supports save, search, list, recent, and snapshot operations.
+with YAML frontmatter. Supports save, search, list, recent, snapshot, threads,
+and backfill operations.
 """
 
 import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 import textwrap
 from datetime import datetime
@@ -17,6 +19,7 @@ from pathlib import Path
 MEMORY_ROOT = Path.home() / ".codex" / "shared-memory"
 ENTRIES_DIR = MEMORY_ROOT / "entries"
 INDEX_FILE = MEMORY_ROOT / "index.json"
+CODEX_STATE_DB = Path.home() / ".codex" / "state_5.sqlite"
 
 
 def ensure_dirs():
@@ -35,10 +38,10 @@ def save_index(entries):
         json.dump(entries, f, indent=2, ensure_ascii=False)
 
 
-def cmd_save(args):
-    """Save a new knowledge entry."""
-    ensure_dirs()
+# 鈹€鈹€ Save 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
+def cmd_save(args):
+    ensure_dirs()
     content = sys.stdin.read().strip()
     if not content:
         print("ERROR: No content provided via stdin", file=sys.stderr)
@@ -53,6 +56,7 @@ def cmd_save(args):
 
     tags = args.tags if args.tags else []
     project = args.project or os.getcwd()
+    thread_id = args.thread_id or ""
 
     frontmatter = textwrap.dedent(f"""\
     ---
@@ -61,6 +65,7 @@ def cmd_save(args):
     tags: {json.dumps(tags)}
     category: {args.category or "general"}
     title: "{args.title}"
+    {f'thread_id: "{thread_id}"' if thread_id else ""}
     ---
 
     """)
@@ -78,6 +83,7 @@ def cmd_save(args):
         "tags": tags,
         "category": args.category or "general",
         "title": args.title,
+        "thread_id": thread_id,
     })
     save_index(index)
 
@@ -85,9 +91,11 @@ def cmd_save(args):
     print(f"Tags: {', '.join(tags) if tags else '(none)'}")
 
 
+# 鈹€鈹€ Search 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+
 def cmd_search(args):
-    """Search entries by keyword, tag, or full text."""
     query = args.query.lower()
+    words = query.split()
     results = []
 
     if not ENTRIES_DIR.exists():
@@ -116,15 +124,24 @@ def cmd_search(args):
         category = re.search(r"category:\s*(\S+)", fm_text)
         category = category.group(1) if category else "general"
 
+        # Multi-word scoring: any word matches = score
         score = 0
-        if query in title.lower():
-            score += 10
-        if any(query in t.lower() for t in tags):
-            score += 5
-        if query in category.lower():
+        title_l = title.lower()
+        body_l = body.lower()
+        for w in words:
+            if w in title_l:
+                score += 10
+            if any(w in t.lower() for t in tags):
+                score += 5
+            if w in category.lower():
+                score += 3
+            if w in body_l:
+                score += 1
+        # Bonus for full phrase match
+        if query in title_l:
+            score += 15
+        if query in body_l:
             score += 3
-        if query in body.lower():
-            score += 1
 
         if score > 0:
             results.append({
@@ -159,8 +176,9 @@ def cmd_search(args):
         print()
 
 
+# 鈹€鈹€ List / Recent 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+
 def cmd_list(args):
-    """List recent entries."""
     if not ENTRIES_DIR.exists():
         print("No memory entries yet.")
         return
@@ -192,6 +210,8 @@ def cmd_list(args):
         date = date.group(1) if date else "unknown"
         tags_str = re.search(r"tags:\s*(\[.*?\])", fm_text)
         tags = json.loads(tags_str.group(1)) if tags_str else []
+        thread_id = re.search(r'thread_id:\s*"(\S+)"', fm_text)
+        thread_id = thread_id.group(1) if thread_id else ""
 
         if tag_filter and tag_filter not in tags:
             continue
@@ -200,21 +220,19 @@ def cmd_list(args):
         category = category.group(1) if category else "general"
 
         count += 1
-        print(f"  [{date}] {title}")
+        tid = f" [thread:{thread_id[:8]}...]" if thread_id else ""
+        print(f"  [{date}] {title}{tid}")
         print(f"         tags: {', '.join(tags)} | category: {category}")
         print()
 
 
 def cmd_recent(args):
-    """Show most recent entries (shorthand)."""
     cmd_list(argparse.Namespace(limit=args.limit, tag=None))
 
 
+# 鈹€鈹€ Snapshot 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+
 def cmd_snapshot(args):
-    """Output a project snapshot template to stdout.
-    
-    The agent fills this in by analyzing the project, then pipes to 'memory.py save'.
-    """
     project_path = args.project or os.getcwd()
     project_name = os.path.basename(project_path.rstrip("/\\"))
 
@@ -247,6 +265,100 @@ def cmd_snapshot(args):
     print(template)
 
 
+# 鈹€鈹€ Threads (list past conversations) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+
+def cmd_threads(args):
+    """List recent Codex conversation threads from the SQLite database."""
+    if not CODEX_STATE_DB.exists():
+        print("Codex state database not found.", file=sys.stderr)
+        return
+
+    try:
+        conn = sqlite3.connect(str(CODEX_STATE_DB))
+        limit = args.limit or 20
+        rows = conn.execute(
+            "SELECT id, title, cwd, created_at, rollout_path FROM threads "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"Error reading Codex database: {e}", file=sys.stderr)
+        return
+
+    if not rows:
+        print("No conversation threads found.")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"  Recent Codex Conversations ({len(rows)} threads)")
+    print(f"{'='*60}\n")
+
+    for row in rows:
+        thread_id, title, cwd, created_at, rollout_path = row
+        ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M") if created_at else "?"
+        tid_short = thread_id[:12] if thread_id else "?"
+        title = title or "(no title)"
+        # truncate title for display
+        display_title = title[:60] + ("..." if len(title) > 60 else "")
+        print(f"  [{ts}] {display_title}")
+        print(f"         id:{tid_short}  cwd:{cwd or '?'}")
+        if args.verbose:
+            print(f"         rollout:{rollout_path or '?'}")
+        print()
+
+
+# 鈹€鈹€ Backfill (import old conversations into memory) 鈹€鈹€鈹€鈹€
+
+def cmd_backfill(args):
+    """Output a list of past conversations for the agent to review and save."""
+    
+    # First, list threads
+    if not CODEX_STATE_DB.exists():
+        print("Codex state database not found.", file=sys.stderr)
+        return
+
+    try:
+        conn = sqlite3.connect(str(CODEX_STATE_DB))
+        limit = args.limit or 20
+        rows = conn.execute(
+            "SELECT id, title, cwd, created_at, rollout_path FROM threads "
+            "ORDER BY created_at DESC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return
+
+    if not rows:
+        print("No conversations to backfill.")
+        return
+
+    # Check which threads are already in shared memory
+    index = load_index()
+    indexed_ids = {e.get("thread_id", "") for e in index}
+
+    new_count = 0
+    for row in rows:
+        thread_id, title, cwd, created_at, rollout_path = row
+        if thread_id in indexed_ids:
+            continue
+        new_count += 1
+        ts = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d") if created_at else "?"
+        title = title or "(no title)"
+        print(f"BACKFILL_CANDIDATE: id={thread_id} date={ts} title={title} cwd={cwd or '?'}")
+
+    if new_count == 0:
+        print("All recent conversations already indexed in shared memory.")
+    else:
+        print(f"\n{new_count} conversations not yet in shared memory.")
+        print("The agent should review each candidate and save notable ones via:")
+        print("  echo '<summary>' | python memory.py save --title '...' --tags ... --thread-id <id>")
+
+
+# 鈹€鈹€ Main 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+
 def main():
     parser = argparse.ArgumentParser(
         description="Cross-project shared memory manager"
@@ -255,11 +367,12 @@ def main():
 
     p_save = sub.add_parser("save", help="Save a knowledge entry (content from stdin)")
     p_save.add_argument("--title", "-t", required=True, help="Entry title")
-    p_save.add_argument("--tags", "-g", nargs="*", default=[], help="Tags (space-separated)")
+    p_save.add_argument("--tags", "-g", nargs="*", default=[], help="Tags")
     p_save.add_argument("--category", "-c", default="general", help="Category")
-    p_save.add_argument("--project", "-p", help="Source project path (default: CWD)")
+    p_save.add_argument("--project", "-p", help="Source project path")
+    p_save.add_argument("--thread-id", help="Codex thread ID this came from")
 
-    p_search = sub.add_parser("search", help="Search entries")
+    p_search = sub.add_parser("search", help="Search entries (supports multi-word)")
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--limit", "-n", type=int, default=10, help="Max results")
     p_search.add_argument("--preview", type=int, default=500, help="Preview length")
@@ -272,7 +385,14 @@ def main():
     p_recent.add_argument("--limit", "-n", type=int, default=5, help="Max results")
 
     p_snapshot = sub.add_parser("snapshot", help="Output project snapshot template")
-    p_snapshot.add_argument("--project", "-p", help="Project path (default: CWD)")
+    p_snapshot.add_argument("--project", "-p", help="Project path")
+
+    p_threads = sub.add_parser("threads", help="List recent Codex conversation threads")
+    p_threads.add_argument("--limit", "-n", type=int, default=20, help="Max threads")
+    p_threads.add_argument("--verbose", "-v", action="store_true", help="Show rollout paths")
+
+    p_backfill = sub.add_parser("backfill", help="Find past conversations not yet in shared memory")
+    p_backfill.add_argument("--limit", "-n", type=int, default=20, help="Max threads to check")
 
     args = parser.parse_args()
 
@@ -286,6 +406,10 @@ def main():
         cmd_recent(args)
     elif args.command == "snapshot":
         cmd_snapshot(args)
+    elif args.command == "threads":
+        cmd_threads(args)
+    elif args.command == "backfill":
+        cmd_backfill(args)
 
 
 if __name__ == "__main__":

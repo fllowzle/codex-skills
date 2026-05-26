@@ -3,153 +3,145 @@ name: cross-project-memory
 description: >-
   Cross-project shared knowledge memory. Saves and retrieves reusable insights
   (bug fixes, patterns, configurations, decisions) across different projects
-  using a global knowledge base. Use when user says "remember this", "save this
-  for later", "snapshot this project", "log this knowledge", or "save to shared
-  memory". Use when starting work in a new project and should check prior
-  learnings. Use when encountering a problem that might have been solved before
-  in another project. Use when user asks "have we done this before", "check
-  cross-project memory", or "search shared knowledge". Use after generating a
-  README or project overview to persist key architectural facts.
+  using a global knowledge base. Auto-snapshots conversation learnings at session
+  end. Indexes past Codex threads for backfill. Use when user says "remember this",
+  "snapshot this project", "backfill old conversations", "save to shared memory".
+  Use when starting work in a new project and should check prior learnings. Use
+  when encountering a problem that might have been solved before. Use after
+  generating a README to persist key architectural facts.
 ---
 
 # Cross-Project Memory
 
-Maintains a shared knowledge base at `~/.codex/shared-memory/entries/` that spans all projects. Knowledge saved in one project is automatically searchable when working in another.
+Maintains a shared knowledge base at `~/.codex/shared-memory/entries/` that spans all projects. Two core capabilities:
 
-## Core Workflow
+- **Live capture**: auto-snapshot learnings at end of every conversation
+- **Historical backfill**: index past Codex threads and import their knowledge
 
-### 1. Project Snapshot (New!)
+## Auto-Snapshot Protocol
 
-Capture the essence of a project so other projects can benefit from it. Triggered by:
-- User says "snapshot this project", "save project overview", "capture project context"
-- After `readme-generator` finishes generating a README
-- When wrapping up significant work on a project
+**At the end of EVERY conversation**, before saying goodbye:
 
-**Two-step process:**
-
-Step A - Generate the template:
+1. Scan the conversation for reusable knowledge
+2. For each finding, run:
 ```bash
-python "<SKILL_DIR>/scripts/memory.py" snapshot --project "<project-path>"
+echo "<SUMMARY>" | python "<SKILL_DIR>/scripts/memory.py" save \
+  --title "<topic>" --tags <tag1> <tag2> --category <cat> \
+  --project "<cwd>" --thread-id "<thread_id>"
 ```
 
-Step B - Fill in the template by analyzing the project:
-1. Read existing README.md, package.json, requirements.txt, docker-compose.yml, etc.
-2. Identify tech stack, architecture pattern, entry points, key dependencies
-3. Fill each section with concrete facts (not generic descriptions)
-4. Pipe the completed content to save:
+**What to snapshot:**
+- Non-trivial bugs solved with their root cause
+- Configuration patterns that actually worked
+- Library/framework choices with the reasoning
+- Environment setup steps that were tricky
+- Code patterns you'd want to reuse
 
-```bash
-python "<SKILL_DIR>/scripts/memory.py" snapshot --project "<path>" | \
-  (echo "<FILLED_CONTENT>" | python "<SKILL_DIR>/scripts/memory.py" save \
-    --title "Project Snapshot: <project-name>" \
-    --tags "<lang>" "<framework>" "<db>" project-snapshot \
-    --category "general")
+**What to skip:** trivial facts, standard docs, one-off typos.
+
+**Report format:** After saving, list what was saved:
+```
+Shared memory updated:
+  - "Docker Compose health checks" (devops)
+  - "FastAPI CORS middleware pattern" (backend)
 ```
 
-**Snapshot template sections:**
-- Tech Stack - languages, frameworks, databases, infrastructure
-- Architecture - high-level pattern, key architectural decisions
-- Entry Points - main files, API endpoints, CLI commands
-- Key Dependencies - critical libraries and why chosen
-- Environment / Setup Notes - env vars, config, ports, services
-- Gotchas & Lessons Learned - pitfalls, workarounds
-- Project-Specific Patterns - conventions, naming rules
+---
 
-### 2. README + Memory Pipeline
+## Historical Backfill
 
-When the `readme-generator` skill is used on a project:
+To index knowledge from past conversations:
 
-1. `readme-generator` produces a comprehensive README.md
-2. **Immediately after**, distill the README into shared memory entries:
-   - Architecture facts -> memory entry tagged `architecture`
-   - Tech stack choices -> memory entry tagged `tech-stack`
-   - Setup gotchas -> memory entry tagged `gotchas`
-   - Key dependencies -> memory entry tagged `dependencies`
-
-This ensures that when you move to another project, the agent can search shared memory and find relevant prior art.
-
-### 3. When to Query (Proactive)
-
-**At the start of every significant task**, before writing code or making decisions:
-
+### Step 1: List past threads
 ```bash
-python "<SKILL_DIR>/scripts/memory.py" search "<keyword1> <keyword2>"
+python "<SKILL_DIR>/scripts/memory.py" threads --limit 20
 ```
 
-Also use `rg` for fast full-text:
+### Step 2: Find unindexed ones
 ```bash
-rg -il "<keyword>" ~/.codex/shared-memory/entries/
+python "<SKILL_DIR>/scripts/memory.py" backfill --limit 20
 ```
 
-**Always query when:**
-- Setting up infrastructure or configurations
-- Choosing between libraries or frameworks
-- Encountering an error that feels familiar
-- Starting work in a new project (search for project snapshots + tech keywords)
-- User asks "have we done X before?"
+### Step 3: For each candidate, recall what was discussed and save
 
-### 4. When to Save
+The agent should:
+1. Read the thread title and cwd to recall the conversation topic
+2. Based on context (rollout_path, artifacts left on disk), summarize key learnings
+3. Save each to shared memory with `--thread-id` to link back
 
-**After resolving a non-trivial problem** or when the user says "remember this":
+```bash
+echo "<RECALLED_SUMMARY>" | python "<SKILL_DIR>/scripts/memory.py" save \
+  --title "..." --tags ... --thread-id "<thread_id>"
+```
 
+---
+
+## Live Workflows
+
+### Project Snapshot
+```bash
+python "<SKILL_DIR>/scripts/memory.py" snapshot --project "<path>"
+```
+Fill the template by analyzing the codebase, then pipe to `save`.
+
+### README-to-Memory Pipeline
+After `readme-generator` finishes: extract architecture, tech stack, gotchas into memory entries.
+
+### On-Demand Save
 ```bash
 echo "<CONTENT>" | python "<SKILL_DIR>/scripts/memory.py" save \
-  --title "<Short descriptive title>" \
-  --tags "<tag1>" "<tag2>" \
-  --category "<category>" \
-  --project "<current project path>"
+  --title "<Title>" --tags <t1> <t2> --category <cat>
 ```
 
-**Save-worthy moments:**
-- Solved a bug with a non-obvious root cause
-- Made an architectural decision with trade-offs
-- Discovered a useful pattern, library, or config trick
-- Figured out environment-specific setup steps
-- Generated a README or project overview (auto-trigger snapshot)
-- User explicitly asks to save something
+---
 
-**Do NOT save:** trivial facts, standard library usage, or things easily found in docs.
+## Querying
 
-### 5. Categories
+```bash
+python "<SKILL_DIR>/scripts/memory.py" search "<multi word query>"
+```
+Supports multi-word: "docker compose" matches entries with both words.
+Fallback: `rg -il "<keyword>" ~/.codex/shared-memory/entries/`
 
-- `devops` - Docker, CI/CD, deployment, infrastructure
-- `frontend` - React, CSS, bundling, UI patterns
-- `backend` - APIs, databases, auth, server logic
-- `database` - Schema design, migrations, query optimization
-- `testing` - Test setup, mocking patterns, test frameworks
-- `api` - API design, REST/GraphQL patterns
-- `general` - Cross-cutting knowledge, project snapshots
+**Query when:**
+- Setting up infra or configs
+- Choosing libraries/frameworks
+- Encountering errors that feel familiar
+- Starting a new project
 
-### 6. Tags
+---
 
-Use lowercase, concise tags. Always include `project-snapshot` for project overview entries. Examples: `docker`, `compose`, `postgres`, `react`, `typescript`, `auth`, `jwt`, `cors`, `nginx`, `redis`, `pytest`, `migration`, `performance`, `security`, `project-snapshot`.
+## Categories
+
+- `devops` - Docker, CI/CD, deployment
+- `frontend` - React, CSS, bundling, UI
+- `backend` - APIs, databases, auth
+- `database` - Schema, migrations, queries
+- `testing` - Test setup, mocking
+- `api` - API design, REST/GraphQL
+- `general` - Cross-cutting, project snapshots
+
+---
 
 ## Script Reference
 
 | Command | Usage |
 |---------|-------|
-| `snapshot --project <path>` | Output project snapshot template to stdout |
-| `save` | Save new entry (content via stdin) |
-| `search <query>` | Search by keyword (scored) |
-| `list --limit N` | List recent entries |
-| `list --tag <tag>` | Filter by tag |
+| `threads --limit N` | List recent Codex conversations |
+| `backfill --limit N` | Find unindexed past conversations |
+| `snapshot --project <p>` | Output project snapshot template |
+| `save --title ... --tags ... --thread-id ...` | Save entry (content via stdin) |
+| `search <multi-word query>` | Search by keywords (scored) |
+| `list --limit N --tag <t>` | List / filter entries |
 | `recent` | Show last 5 entries |
 
-## Example: Full README-to-Memory Pipeline
+---
 
-```
-User: "Generate a README for this project"
+## Multi-Device Strategy
 
-Agent:
-  1. readme-generator analyzes repo -> produces README.md
-  2. Agent thinks: "Let me snapshot this into shared memory"
-  3. Runs: python memory.py snapshot -> gets template
-  4. Fills template from README + codebase analysis
-  5. Saves to shared memory with tags: python, fastapi, postgres, project-snapshot
-  6. Confirms: "Saved project snapshot to shared memory (6 tags)"
+Shared memory lives at `~/.codex/shared-memory/`. To sync across devices:
+1. Git-track the directory: `cd ~/.codex/shared-memory && git init && git add -A && git commit -m "memory"`
+2. Push to a private repo
+3. On a new device: `git clone <repo> ~/.codex/shared-memory`
 
-Later, in a different project:
-  User: "Set up FastAPI with Postgres"
-  Agent: searches shared memory -> finds the prior project's snapshot
-  Agent: "Your previous project used FastAPI + asyncpg + Alembic. Reuse that pattern?"
-```
+This way knowledge captured on device A is queryable on device B.
